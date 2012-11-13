@@ -1,0 +1,15 @@
+<?php
+/* $Id$ */
+
+/**
+ * @copyright Oregon State University, Central Web Services
+ * @author Shayne Huddleston <shayne.huddleston @ 
+ * @package Drupal
+ * @subpackage modules
+ */
+
+
+function osu_update_test(){}
+
+
+?>

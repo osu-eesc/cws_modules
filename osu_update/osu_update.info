@@ -1,0 +1,8 @@
+; $Id$
+name = OSU Update
+description = This module allows for upgrades campus wide via scripts
+version = "6.x-2.3"
+package="OSU Drupal"
+core = "6.x"
+
+

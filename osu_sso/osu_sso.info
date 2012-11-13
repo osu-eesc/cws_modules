@@ -1,0 +1,5 @@
+; $Id$
+name = OSU SSO
+description = Oregon State University Single Sign On Drupal Module 
+core = 6.x
+package="OSU Drupal"

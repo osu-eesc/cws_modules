@@ -1,0 +1,147 @@
+<?php
+
+/**
+ * If user is sso_authenticate:
+ * It loads the user's information, or creates a new account for them
+ * Else, it redirects them to a login prompt
+ * Sets $_SESSION['userinfo']
+ *      $_SESSION['osu_sso_cached_cookie']
+ *      $_SESSION['osu_sso_next_auth']
+ * @access private
+ * @return null
+ */
+function _osu_sso_authorize_user() {
+  global $user; 
+  $osu_sso_site_config = sso_config();
+
+  $requested_url = ($_SERVER['HTTPS'] ? 'https' : 'http').'://'.$_SERVER['SERVER_NAME'].request_uri();
+
+  if (!$sso_auth_expire_time = sso_authenticate(true, true, array('url' => $requested_url))) {
+    drupal_set_message('Problem Authenticating Your User');
+    watchdog('osu_sso', 'Error with SSO Authentication', array(), WATCHDOG_NOTICE);
+    drupal_goto(variable_get('site_frontpage', 'node'));
+  }
+
+  $userinfo = sso_session_userinfo();
+  $_SESSION['userinfo'] = $userinfo;
+  $_SESSION['osu_sso_cached_cookie'] = md5($_COOKIE[$osu_sso_site_config['sso_cookie']].
+      $_SERVER['HTTP_USER_AGENT']); //Hash for more hoops to jump.
+  $_SESSION['osu_sso_next_auth'] = time() + OSU_SSO_CACHE_TTL_SECS;
+
+  // Check to make sure the user is not blocked.
+  if (user_is_blocked($userinfo['userinfo']['username'])) {
+    drupal_set_message(t('Unable to login.'),'error');
+    $user = user_load(array('uid' => 0));
+    return;
+  }
+
+  $loaded_user = user_load(array('name' => $userinfo['userinfo']['username']));
+
+  // The user does not exist in our Drupal
+  if (!$loaded_user->uid) {
+    // Check to see if we should register the user in this Drupal install
+    $user_register = variable_get('osu_sso_user_register', 0);
+    if ($user_register == 1) {
+      $role_names =
+        explode(
+          ',',
+          variable_get('osu_sso_user_register_roles', ''));
+
+      if (!empty($role_names)) {
+        $new_user_roles = array();
+        foreach ($role_names as $rname) {
+          $rid = db_result(db_query('SELECT `rid` FROM {role} WHERE `name` = "%s"', $rname));
+          if ($rid) {
+            $new_user_roles[$rid] = $rname;
+          }
+          else {
+            watchdog(
+              'osu_sso', 
+              t(
+                'Could not add new user %name (SSO) to role %role because it is missing',
+                array(
+                  '%name' => $userinfo['userinfo']['username'],
+                  '%role' => $rname)),
+              array(),
+              WATCHDOG_WARNING);
+          }
+        }
+        if (!empty($new_user_roles)) {
+          $user_default = array(
+            'name' => $userinfo['userinfo']['username'], 
+            'pass' => '', 
+            'init' => db_escape_string($userinfo['userinfo']['username']), 
+            'status' => 1, 
+            'roles' => $new_user_roles);
+          if (!empty($userinfo['userinfo']['email'])) {
+            $user_default['mail'] = $userinfo['userinfo']['email'];
+          }
+          else if (!empty($userinfo['isonid']) && $userinfo['isonid'] == 1) {
+            $user_default['mail'] = "{$userinfo['userinfo']['username']}@onid.oregonstate.edu";
+          }
+          else {
+            $user_default['mail'] = null;
+          }
+    
+          $new_user = user_save('', $user_default);
+          watchdog(
+            'osu_sso', 
+            t('New user: %name (SSO).', array('%name' => theme('placeholder', $new_user->name))), 
+            l(t('edit user'), "admin/user/edit/{$new_user->uid}"));
+          // Reload the user so we have a full object, and don't mess up the system.
+          $loaded_user = user_load(array('name' => $userinfo['userinfo']['username']));
+        }
+      }
+    }
+  }
+
+  // We still have not loaded a valid user account, so use uid 0.
+  if (empty($loaded_user->uid)) {
+    $loaded_user = user_load(array('uid' => 0));
+  }
+
+  $user = $loaded_user;
+}
+
+/**
+ * Redirects to the login page. 
+ * @access private
+ * @return null
+ */
+function _osu_sso_login_page() 
+{
+  if (variable_get('osu_sso_enable', 0) != 1) {
+    return;
+  }
+
+  _osu_sso_authorize_user();
+  $destination = ($_SERVER['HTTPS'] ? 'https' : 'http').'://'.$_SERVER['SERVER_NAME'].base_path();
+  drupal_goto($destination);
+}
+
+/**
+ * Determines whether osu_sso login should be enforced for this page load.
+ * This is done based on the redirection settings for this module.
+ *
+ * @access private
+ * @return boolean $page_match True or False depending on the current page
+ */
+function _osu_sso_force_login() 
+{
+  if (variable_get('osu_sso_access', 0) == 1) {
+    return true;
+  }
+  else {
+    $page_match = false;
+    $pages = variable_get('osu_sso_pages', OSU_SSO_PAGES_DEFAULT);
+    // This common page matching logic used throughout drupal.
+    if ($pages) {
+      $path = drupal_get_path_alias($_GET['q']);
+      $regexp = '/^('. preg_replace(array('/(\r\n?|\n)/', '/\\\\\*/', '/(^|\|)\\\\<front\\\\>($|\|)/'), array('|', '.*', '\1'. variable_get('site_frontpage', 'node') .'\2'), preg_quote($pages, '/')) .')$/';
+      $page_match = preg_match($regexp, $path);
+    }
+    return $page_match;
+  }
+}
+
+?>

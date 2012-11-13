@@ -1,0 +1,6 @@
+;$Id$
+name = "OSU Search"
+description = "Embed the OSU search results into the site."
+version=6.x.0.01
+core = 6.x
+package = OSU Drupal

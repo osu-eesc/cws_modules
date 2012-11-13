@@ -1,0 +1,574 @@
+<?php
+/* $Id$ */
+/* Oregon State University - Single Sign On
+ * Author: George Harkin <george.harkin@oregonstate.edu>
+ * Drapal 6 API update: Barry Chen <barry.chen@oregonstate.edu>
+ * Code rewritten from CAS module. <http://drupal.org/project/cas>
+ */
+
+require_once('./includes/common.inc');
+require_once('./includes/path.inc');
+require_once('./includes/theme.inc');
+require_once('./modules/user/user.module');
+require_once('osu_sso.lib');
+require_once('sso/sso.php');
+
+define('OSU_SSO_CACHE_TTL_SECS', 600);
+// Match this with the value in osu_update and OSU profiles.
+define('OSU_SSO_PAGES_DEFAULT', "admin\nadmin/*\nview/pages\nnode/*/edit*\nosu_checkout*\nuser\nuser/*");
+
+/**
+ * Valid permission for this module
+ * @access public
+ * @return array An Array of valid permission for the osu_sso module
+ */
+function osu_sso_perm() {
+  return array('administer osu_sso');
+}
+
+/**
+ * Implementation of hook_init
+ * Traps a page load to see if authentication is required.
+ * @access public
+ * @return null
+ */
+function osu_sso_init() {
+  if (variable_get('osu_sso_enable', 0) != 1) {
+    return;
+  }
+
+  global $user;
+  $time = time();
+
+  // Setup SSO
+  $osu_sso_site_config = array(
+    'auto'                => '0',
+    'sso_service'         => variable_get('osu_sso_service', null),
+    'sso_password'        => variable_get('osu_sso_password', null),
+    'logout_redirect'     => variable_get('osu_sso_logout_redirect', '0'),
+    'sess_enable'         => '0',
+    'sso_host'            => variable_get('osu_sso_host', 'secure.onid.oregonstate.edu'),
+    'sso_path'            => variable_get('osu_sso_path', '/sso/rpc'),
+    'sso_cookie'          => variable_get('osu_sso_cookie', 'sso'),
+    'sso_login_url'       => variable_get('osu_sso_login_url', 'https://secure.onid.oregonstate.edu/login'),
+    'sess_enable'         => '0');
+  sso_config($osu_sso_site_config);
+
+  // If they don't have an sso cookie
+  if (empty($_COOKIE[$osu_sso_site_config['sso_cookie']])) {
+    // If we are forcing logins for this page, go perform a login
+    if (_osu_sso_force_login()) {
+      _osu_sso_authorize_user();
+    }
+    // Otherwise, they are just a guest
+    else {
+      $user = user_load(array('uid' => 0));
+    }
+  }
+  // Else, they have a sso cookie
+  else {
+    // If they have a cookie but have not logged in here before, or their
+    // cookie is invalid compared to the cached cookie
+    $md5_cookie = md5($_COOKIE[$osu_sso_site_config['sso_cookie']].$_SERVER['HTTP_USER_AGENT']);
+    if (empty($_SESSION['osu_sso_cached_cookie']) ||
+        ($_SESSION['osu_sso_cached_cookie'] != $md5_cookie)) {
+      // If they are still logged in or if they are on a page that requires a
+      // login, we should look up their user
+      if (sso_authenticate(false) || _osu_sso_force_login()) {
+        _osu_sso_authorize_user();
+      }
+      // Else, just treat them as anonymous, and return now
+      else {
+        $user = user_load(array('uid' => 0));
+        return;
+      }
+      // Log that they actually logged in
+      if ($user->uid && $user->uid > 0) {
+        drupal_set_message("Logged in via SSO as {$user->name}.");
+        watchdog('osu_sso', t('Session opened for %name.', array('%name' => theme('placeholder', $user->name))), array(), WATCHDOG_INFO);
+      }
+    }
+    // They have a valid cookie and have logged in here before
+    else {
+      // If the cached authorization expired _and_
+      // they are requesting a secured page
+      if ((empty($_SESSION['osu_sso_next_auth']) ||
+            ($_SESSION['osu_sso_next_auth'] < $time)) && _osu_sso_force_login()) {
+        // Then we want to make sure they are logged in,
+        _osu_sso_authorize_user();
+      }
+      // Else, if their cached authorization expired, refresh it.
+      else if ($_SESSION['osu_sso_next_auth'] < $time) {
+        // Only refresh it if they are still logged into sso
+        if ($sso_auth_expire_time = sso_authenticate(false)) {
+          $_SESSION['osu_sso_next_auth'] = $time + OSU_SSO_CACHE_TTL_SECS;
+        }
+        // Otherwise, don't refresh it, and make them a regular user
+      }
+
+      // If they get here, lookup their userinfo from the session
+      if ($_SESSION['osu_sso_next_auth'] >= $time) {
+        $userinfo = $_SESSION['userinfo'];
+        // If the username is blocked, deny them access.
+        if (user_is_blocked($userinfo['userinfo']['username'])) {
+          $user = user_load(array('uid' => 0));
+        } else {
+          $user = user_load(array('name' => $userinfo['userinfo']['username']));
+          // If they don't have an account, we probably are not auto registering, load regular user
+          if (!$user->uid) {
+            $user = user_load(array('uid' => 0));
+          }
+        }
+      }
+      // Else, their next auth was before now, so they are just a regular user now
+      else {
+        $user = user_load(array('uid' => 0));
+      }
+    }
+  }
+}
+
+
+/**
+ * Implements hook_menu to create pages for administration and login.
+ * @access public
+ * @params boolean $may_cache Set true if the menu items can be cached without issue.
+ * @return array $items A list of items to add to the menuing subsystem.
+ */
+function osu_sso_menu()
+{
+  global $user;
+
+  $items = array();
+
+  $items['admin/settings/osu_sso'] = array(
+    'title'               => 'OSU SSO configuration',
+    'description'         => 'Configure single sign on service',
+    'page callback'       => 'drupal_get_form',
+    'page arguments'      => array('osu_sso_admin_settings'),
+    'access callback'     => 'user_access',
+    'access arguments'    => array('administer site configuration'),
+    'type'                => MENU_NORMAL_ITEM);
+
+  // Override default user login behavior
+  $items['user'] = array(
+    'title'               => 'User Login',
+    'page callback'       => '_osu_sso_login_page',
+    'access callback'     => true,
+    'type'                => MENU_CALLBACK);
+  $items['user/login'] = array(
+    'title'               => 'User Login',
+    'page callback'       => '_osu_sso_login_page',
+    'access callback'     => true,
+    'type'                => MENU_CALLBACK);
+
+  // Add a new login location for ease
+  $items['login'] = array(
+    'title'               => 'User Login',
+    'page callback'       => '_osu_sso_login_page',
+    'access callback'     => true,
+    'type'                => MENU_CALLBACK);
+
+  return $items;
+}
+
+
+/**
+ * Provides admin settings pages.
+ * @access public
+ * @return Output of call to system_settings_form with $form elements for this
+ * module
+ */
+function osu_sso_admin_settings() {
+  $is_superuser = (1 == $GLOBALS['user']->uid);
+
+  if ($is_superuser) {
+    $form['osu_sso_enable'] = array(
+      '#type'             => 'radios',
+      '#title'            => t('SSO Status'),
+      '#default_value'    => variable_get('osu_sso_enable', 0),
+      '#description'      => t('Turns on the Single Sign On Module. Please configure the following options before enabling it.<br /> Enabling this module will diable all user passwords set and instead use login credentials from ONID Single Sign On'),
+      '#options'          => array('1' => t('Enabled'), '0' => t('Disabled')));
+    $form['account'] = array(
+      '#type'             => 'fieldset',
+      '#title'            => t('Service Credentials'));
+    $form['account']['osu_sso_service'] = array(
+      '#type'             => 'textfield',
+      '#title'            => t('Name'),
+      '#default_value'    => variable_get('osu_sso_service', null),
+      '#description'      => t('The name of the single sign on service that this application will be identified by.'),
+      '#maxlength'        => '16',
+      '#size' => '15');
+    $form['account']['osu_sso_password'] = array(
+      '#type'             => 'textfield',
+      '#title'            => t('Password'),
+      '#default_value'    => variable_get('osu_sso_password', null),
+      '#description'      => t('The password of the single sign on service.'),
+      '#maxlength'        => '16',
+      '#size'             => '15');
+  }
+
+  $form['advanced'] = array(
+    '#type'             => 'fieldset',
+    '#title'            => t('Service Settings'));
+
+  if ($is_superuser) {
+    $form['advanced']['osu_sso_host'] = array(
+      '#type'             => 'textfield',
+      '#title'            => t('SSO Service Hostname'),
+      '#default_value'    => variable_get('osu_sso_host', 'secure.onid.oregonstate.edu'),
+      '#description'      => t('The hostname of the single sign on service. Should not need to modify.'),
+      '#maxlength'        => '255',
+      '#size'             => '30');
+    $form['advanced']['osu_sso_path'] = array(
+      '#type'             => 'textfield',
+      '#title'            => t('SSO Path'),
+      '#default_value'    => variable_get('osu_sso_path', '/sso/rpc'),
+      '#description'      => t('The path for the osu_sso cookie. Should not need to modify.'),
+      '#maxlength'        => '255',
+      '#size'             => '15');
+    $form['advanced']['osu_sso_cookie'] = array(
+      '#type'             => 'textfield',
+      '#title'            => t('SSO Cookie'),
+      '#default_value'    => variable_get('osu_sso_cookie', 'sso'),
+      '#description'      => t('The name for the osu_sso cookie. Should not need to modify.'),
+      '#maxlength'        => '255',
+      '#size'             => '15');
+    $form['advanced']['osu_sso_login_url'] = array(
+      '#type'             => 'textfield',
+      '#title'            => t('SSO Login URL'),
+      '#default_value'    => variable_get('osu_sso_login_url', 'https://secure.onid.oregonstate.edu/login'),
+      '#description'      => t('The url for the single sign on service to log into from.<br/> Include http(s)://'),
+      '#maxlength'        => '255',
+      '#size'             => '30');
+    $form['advanced']['osu_sso_access'] = array(
+      '#type'             => 'radios',
+      '#title'            => t('Require SSO login for '),
+      '#default_value'    => variable_get('osu_sso_access',0),
+      '#options'          => array(t('specific pages'), t('all pages')),
+      '#weight'           => 6);
+    $form['advanced']['osu_sso_user_register'] = array(
+      '#type'             => 'checkbox',
+      '#title'            => t('Register New SSO Users Automatically'),
+      '#default_value'    => variable_get('osu_sso_user_register', 0),
+      '#description'      => t('This feature will create a new account for any user that logs in and does not have an account on the system. This would be very useful for commenting on posts from new users. Otherwise they will have to request a new account.'),
+      '#weight'           => 8);
+    $form['advanced']['osu_sso_user_register_roles'] = array(
+      '#type'             => 'textfield',
+      '#title'            => t('Role(s) for auto-registered SSO users'),
+      '#default_value'    => variable_get('osu_sso_user_register_roles', ''),
+      '#description'      => t('Comma-separated names of roles.'),
+      '#weight'           => 9);
+    $form['advanced']['osu_sso_show_email'] = array(
+      '#type'             => 'checkbox',
+      '#title'            => t('Allow users to change email address'),
+      '#default_value'    => variable_get('osu_sso_show_email', 0),
+      '#description'      => t('Show email address field on the edit user form'),
+      '#weight'           => 10);
+  }
+
+  // Do not display the permanent SSO-specific pages in the textarea.
+  $perm_sso_pages =
+    array_map(
+      'trim',
+      explode(
+        "\n",
+        OSU_SSO_PAGES_DEFAULT));
+  $custom_sso_pages =
+    array_map(
+      'trim',
+      explode(
+        "\n",
+        variable_get(
+          'osu_sso_pages',
+          '')));
+  $default_sso_pages = implode("\n", array_diff($custom_sso_pages, $perm_sso_pages));
+
+  $form['advanced']['osu_sso_pages'] = array(
+    '#type'             => 'textarea',
+    '#title'            => t('SSO-specific pages'),
+    '#default_value'    => $default_sso_pages,
+    '#cols'             => 40,
+    '#rows'             => 4,
+    '#description'      =>
+      t(
+        "Enter one page per line as Drupal paths. The '*' character is a wildcard.
+        Example paths are '<em>blog</em>' for the blog page and '<em>blog/*</em>'
+        for every personal blog. '<em>&lt;front&gt;</em>' is the front page.
+        These paths are always considered SSO-specific: %defaults.",
+        array('%defaults' => str_replace("\n", ', ', OSU_SSO_PAGES_DEFAULT))),
+    '#weight'           => 7);
+
+  return system_settings_form($form);
+}
+
+/**
+ * Validate the admin. settings.
+ *
+ * @access public
+ * @param string $form The form definition array.
+ * @param array &$form_state Reference to the form state array.
+ * @return void
+ */
+function osu_sso_admin_settings_validate($form, &$form_state) {
+  if ($form_state['values']['osu_sso_user_register']) {
+    $valid_role_count = 0;
+    $form_state['values']['osu_sso_user_register_roles'] = trim($form_state['values']['osu_sso_user_register_roles']);
+    if (!empty($form_state['values']['osu_sso_user_register_roles'])) {
+      $roles = array_map('trim', explode(',', $form_state['values']['osu_sso_user_register_roles']));
+      if (!empty($roles)) {
+        foreach ($roles as $r) {
+          if ($r) {
+            if (db_result(db_query("SELECT rid FROM {role} WHERE name = '%s'", $r))) {
+              if ('administrator' == $r) {
+                form_set_error(
+                  'osu_sso_user_register_roles',
+                  t('You cannot automatically register SSO visitors as administrators.'));
+                return;
+              }
+              $valid_role_count++;
+            }
+            else {
+              $t_args = array('%role' => $r);
+              form_set_error(
+                'osu_sso_user_register_roles',
+                t('The role %role does not exist.', $t_args));
+              return;
+            }
+          }
+        }
+      }
+    }
+
+    if (!$valid_role_count) {
+      form_set_error(
+        'osu_sso_user_register_roles',
+        t('Please specify the role(s) for auto-registered SSO users.'));
+    }
+  }
+}
+
+/**
+ * Handle submissions of the admin. settings form.
+ *
+ * @access public
+ * @param string $form The form definition array.
+ * @param array &$form_state Reference to the form state array.
+ * @return void
+ */
+function osu_sso_admin_settings_submit($form, &$form_state) {
+  // Add the permanent SSO-specific pages to 'osu_sso_pages'.
+  $perm_sso_pages = explode("\n", OSU_SSO_PAGES_DEFAULT);
+
+  if (!empty($form_state['values']['osu_sso_pages'])) {
+    $custom_sso_pages = explode("\n", $form_state['values']['osu_sso_pages']);
+
+    // Remove the empty string, it causes all urls to require sso, and we have an option for that.
+    foreach ($custom_sso_pages as $key=>$val) {
+      if (preg_match('/^\s+$/',$custom_sso_pages[$key]) || strlen($custom_sso_pages[$key]) == 0) {
+        unset($custom_sso_pages[$key]);
+      }
+    }
+  } else {
+    $custom_sso_pages = array();
+  }
+
+  if (!empty($custom_sso_pages)) {
+    $full_sso_pages = array_merge($perm_sso_pages, $custom_sso_pages);
+  } else {
+    $full_sso_pages = $perm_sso_pages;
+  }
+
+  $form_state['values']['osu_sso_pages'] =
+    implode(
+      "\n",
+      array_unique(array_map('trim', $full_sso_pages)));
+
+  // Clean up the role names.
+  if (!empty($form_state['values']['osu_sso_user_register_roles'])) {
+    // Trim all values.
+    $form_state['values']['osu_sso_user_register_roles'] =
+      array_map(
+        'trim',
+        explode(
+          ',',
+          $form_state['values']['osu_sso_user_register_roles']));
+    // Prune empty values.
+    $form_state['values']['osu_sso_user_register_roles'] =
+      array_filter(
+        $form_state['values']['osu_sso_user_register_roles'],
+        create_function('$a', 'return $a;'));
+    // Convert back to CSV.
+    $form_state['values']['osu_sso_user_register_roles'] =
+      implode(
+        ',',
+        array_unique($form_state['values']['osu_sso_user_register_roles']));
+  }
+
+  system_settings_form_submit($form, $form_state);
+}
+
+/**
+ * Provides login block that only shows up when the user logs in.
+ *
+ * @access public
+ * @param string $op The current operation, default to 'list'
+ * @param string $delta The block element being edited, more info in hook_block
+ * @param array $edit
+ * @return array $block(s) The block(s) to be viewed or listed
+ */
+function osu_sso_block($op = 'list', $delta = 0, $edit = array()) {
+  global $user;
+
+  if (variable_get('osu_sso_enable', 0) != 1) {
+    return;
+  }
+
+  if ($op == 'list') {
+    $blocks[0]['info'] = t('SSO User login');
+    return $blocks;
+  }
+  else if ($op == 'view') {
+    $block = array();
+
+    switch ($delta) {
+      case 0:
+        if ($user->uid && $user->uid > 0) {
+          $edit = $_POST['edit'];
+
+          $userinfo = $_SESSION['userinfo'];
+
+          $output = "<div class=\"user-login-block\">\n";
+          $output .= 'Logged in as: ';
+          $output .= $userinfo['userinfo']['fullname'];
+          $output .= ' [<a href="';
+          $output .= url('logout');
+          $output .= '">Logout</a>]';
+          $output .= "</div>\n";
+          $block['content'] = $output;
+        }
+        return $block;
+    }
+  }
+}
+
+
+/**
+ * User hook for performing actions on user changes, in this case, additional
+ * logout functionality.
+ *
+ * @access public
+ * @param string $op The operation being performed
+ * @param $edit
+ * @param $account
+ * @param $category
+ * @return null
+ */
+function osu_sso_user($op, &$edit, &$account, $category = NULL)
+{
+  switch ($op) {
+    case 'logout':
+      sso_logout();
+      $_SESSION['userinfo'] = null;
+      $_SESSION['osu_sso_cached_cookie'] = null;
+      drupal_set_message('Logged out of SSO');
+      return;
+  }
+}
+
+
+/**
+ * Implementation of hook_form_alter
+ * Overrides specific from settings based on user policy.
+ *
+ * @access public
+ * @param array $form Nested array of form elements that comprise the form.
+ * @param array $form_state A keyed array containing the current state of the form.
+ * @param string $form_id String representing the name of the form itself. Typically this is the name of the function that generated the form.
+ * @return null
+ */
+function osu_sso_form_alter(&$form, $form_state, $form_id)
+{
+
+  if (variable_get('osu_sso_enable', 0) != 1) {
+    return;
+  }
+  //get the cws_dpla user id so we can disable modifying or deleting the account
+  // this should just be 1, but just in case, lets pull the uid by name
+  $cws_dpla = user_load(array('name' => 'cws_dpla'));
+  switch ($form_id){
+    case 'user_register':
+      // Remove the password fields from the form.
+      unset($form['pass']);
+      break;
+
+    case 'user_edit':
+      // Hide the email field unless it is enabled in the sso configuration
+      if (!variable_get('osu_sso_show_email', 0)) {
+        $form['account']['mail']['#type'] = 'hidden';
+        $form['account']['mail']['#default_value'] = $form['account']['name']['#default_value'].'@onid.oregonstate.edu';
+      }
+
+      // Remove the password fields from the form
+      unset($form['account']['pass']);
+      break;
+
+    case 'user_admin_account':
+      // This removes the checkbox in the user list that would allow cws_dpla to be selected
+      // for removal or modification
+
+      if (($GLOBALS['user']->uid) && ($GLOBALS['user']->uid != $cws_dpla->uid)) {
+        unset($form['accounts']['#options'][$cws_dpla->uid]);
+      }
+      break;
+
+    case 'user_profile_form':
+      // this removes fields from the form that should not be modified (cws_dpla should not be
+      // edited) if the user is not actually cws_dpla. A message is displayed to explain the
+      // situation
+
+      if ($form['account']['name']['#default_value'] == 'cws_dpla') {
+        if (($GLOBALS['user']->uid) && ($GLOBALS['user']->uid != $cws_dpla->uid)) {
+          // Drupal gets confused if you try to remove the entire form here, we'll just take out the
+          // displayed fields
+          unset($form['account']);
+          unset($form['submit']);
+          unset($form['delete']);
+          unset($form['theme_select']);
+          unset($form['locale']);
+          unset($form['timezone']);
+          unset($form['#after_build']);
+
+          drupal_set_message('The cws_dpla account cannot be modified.');
+        }
+      }
+      break;
+
+  }
+}
+
+/**
+ * Implements hook_nodeapi().
+ *
+ * @access public
+ * @param $node "The node the action is being performed on."
+ * @param $op The kind of action.
+ * @see http://api.drupal.org/api/5/function/hook_nodeapi
+ * @return void
+ */
+function osu_sso_nodeapi(&$node, $op, $a3 = NULL, $a4 = NULL) {
+  $protected_paths = array('login', 'logout');
+
+  if ($op == 'validate') {
+    $path = strtolower(trim($node->path));
+    if (in_array($path, $protected_paths)) {
+      form_set_error(
+        'path',
+        t(
+          'You cannot use the URL path \'!path\'. It has been reserved for authentication services.',
+          array('!path' => $path)));
+    }
+  }
+}
+
+?>

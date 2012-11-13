@@ -1,0 +1,52 @@
+form#osu-search-form div.form-radios div.form-item {
+  display: inline;
+}
+form#osu-search-form div.form-radios div.form-item label input {
+  vertical-align: middle;
+}
+div#osu-search-results {
+  margin-top: 1em;
+}
+dt.osu-search-result-title {
+  font-weight: bold;
+}
+span.osu-search-highlight {
+  font-weight: bold;
+}
+dd.osu-search-result-url {
+  color: #996600;
+  margin-bottom: 0.7em;
+}
+div#osu-search-pages-nav { 
+  border-top: 1px solid #c1c2ab;
+  padding-top: 0.3em;
+}
+div#osu-search-pages-nav span {
+  margin-left: 0.2em;
+  margin-right: 0.2em;
+}
+span.osu-search-current-page {
+  background-color: #edede7;
+  border: 1px solid #c1c2ab;
+  padding: 0.2em;
+}
+
+div.n {
+    padding-top:1.5em;
+    color:#000;
+}
+
+div.n th, div.n td {
+    border:none;
+    padding:0em;
+}
+
+#querystats {
+    margin-top:0.8em;
+    margin-bottom:0em;
+}
+
+#querystats th, #querystats td {
+    border:none;
+    padding:0em;
+}

@@ -1,0 +1,17 @@
+2007-08-07
+ * Fixed a bug in custom session handler where a call to session_regenerate_id() would fail to update the session with the new session identifier.
+
+2005-12-12
+ * Fixed a bug in sso_login() where query string parameters were being separated by '&amp;' instead of '&'
+
+2005-11-18
+ * Fixed bug where multiple calls to sso_getuserinfo_byusername() always returned the results of the first call.
+
+2005-11-11
+ * Minor fix to sso_ldap_get_record() - it now returns false if search results are empty.
+
+2005-09-26
+ * Fixed bug where some functions did not fail gracefully when connection problems to the xmlrpc server occurred
+
+2005-09-19
+ * Fixed a bug in sso_session_fill_userinfo() that was preventing the caching mechanism from working properly. This non-critical bugfix improves library performance by eliminating an unecessary xmlrpc call in most cases.

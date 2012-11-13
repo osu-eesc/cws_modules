@@ -1,0 +1,422 @@
+<?php
+/* $Id$ */
+
+/**
+ * @copyright Oregon State University, Central Web Services
+ * @author Shayne Huddleston <shayne.huddleston @
+ * @package Drupal
+ * @subpackage modules
+ */
+
+
+function osu_update_install() {
+    drupal_set_message(t('Update module installed.'));
+}
+
+function osu_update_uninstall() { drupal_set_message(t('Update module uninstalled.'));
+}
+
+function osu_update_update_6000(){
+
+    require_once "./profiles/osu/osu.profile";
+
+    //Step 0: lets dump the modules we know for sure we dont want..and clean up random stuff we need to
+    //we are not using module uninstall as the actual module is missing and may/may not exist
+
+    //dump the existing permisions that no longer make sense
+    db_query('DELETE FROM {permission} WHERE `rid` = "3" OR `rid` = "4" OR `rid` = "5"');
+
+    //lets kill tiny mce
+    db_query("DROP TABLE {tinymce_settings}");
+    db_query("DROP TABLE {tinymce_role}");
+
+    db_query('DELETE FROM {system} WHERE `name` = "tinymce" AND type = "module"');
+
+    //lets kill our osu checkout
+    variable_del('osu_checkout_max_idle_mins');
+    db_query("DROP TABLE {osu_checkout_drafts}");
+    db_query("DROP TABLE {osu_checkout_locks}");
+    db_query('DELETE FROM {sequences} WHERE name = "{osu_checkout_drafts}_did"');
+    db_query('DELETE FROM {profile_fields} WHERE `name` = "profile_osu_checkout_lost_lock"');
+
+    db_query('DELETE FROM {system} WHERE `name` = "osu_checkout" AND type = "module"');
+
+    //clean up any nodes with bogus vids
+    db_query('DELETE FROM {node} WHERE `vid` = "0"');
+
+    //lets kill the category module category
+    db_query("DROP TABLE {category}");
+    db_query("DROP TABLE {category_cont}");
+    db_query("DROP TABLE {category_cont_node_types}");
+    db_query("DROP TABLE {category_cont_distant}");
+    db_query("DROP TABLE {category_display}");
+    db_query("DROP TABLE {category_export}");
+    db_query("DROP TABLE {category_hierarchy}");
+    db_query("DROP TABLE {category_legacy}");
+    db_query("DROP TABLE {category_legacy_map}");
+    db_query("DROP TABLE {category_menu}");
+    db_query("DROP TABLE {category_menu_map}");
+    db_query("DROP TABLE {category_node}");
+    db_query("DROP TABLE {category_relation}");
+    db_query("DROP TABLE {category_synonym}");
+    db_query("DROP TABLE {category_views}");
+
+    //remove reference to the modules from system table
+    db_query('DELETE FROM {system} WHERE `name` = "category" AND type = "module"');
+    db_query('DELETE FROM {system} WHERE `name` = "category_bulkedit" AND type = "module"');
+    db_query('DELETE FROM {system} WHERE `name` = "category_display" AND type = "module"');
+    db_query('DELETE FROM {system} WHERE `name` = "category_export" AND type = "module"');
+    db_query('DELETE FROM {system} WHERE `name` = "category_legacy" AND type = "module"');
+    db_query('DELETE FROM {system} WHERE `name` = "category_menu" AND type = "module"');
+    db_query('DELETE FROM {system} WHERE `name` = "category_outliner" AND type = "module"');
+    db_query('DELETE FROM {system} WHERE `name` = "category_pathauto" AND type = "module"');
+    db_query('DELETE FROM {system} WHERE `name` = "category_transform" AND type = "module"');
+    db_query('DELETE FROM {system} WHERE `name` = "category_views" AND type = "module"');
+
+    //Step 1: find the modules we need to install and install them all
+
+    $modules_to_install = osu_profile_modules();
+
+    foreach($modules_to_install as $module){
+      _drupal_install_module($module);
+       module_enable(array($module));
+    }
+
+    //Step 2: Lets now run the install task from profile to get the perms etc we want
+    osu_profile_tasks();
+
+
+    //Step 3: Now we need to just clean up a couple of random fellows that assumed a fresh install
+
+    //dump the gatekeeper and make them an advanced author
+    db_query("UPDATE {role} SET `name` = 'advanced author' WHERE `rid`= 4");
+
+    //make all our former gatekeepers into authors
+    db_query("UPDATE {users_roles} SET `rid` = '3' WHERE `rid`= 4");
+
+    //add missing tinymce format 2
+    //db_query("INSERT INTO {wysiwyg} (`format`, `editor`) VALUES (2, 'tinymce')");
+
+    //setup permissions for the input filter module correctly...little different order on install
+    db_query("UPDATE {filter_formats} SET `roles` = ',5,4,' WHERE `format`= 2");
+    db_query("UPDATE {filter_formats} SET `roles` = ',5,3,4,' WHERE `format`= 3");
+
+    //clean up junk in fitlers table...then insert values that need to be present
+    db_query('DELETE FROM {filters} WHERE `module` = "filter" OR `module` = "php"');
+    db_query("INSERT INTO {filters} (`format`, `module`, `delta`, `weight`) VALUES (1, 'filter', 0, 1)");
+    db_query("INSERT INTO {filters} (`format`, `module`, `delta`, `weight`) VALUES (1, 'filter', 1, 2)");
+    db_query("INSERT INTO {filters} (`format`, `module`, `delta`, `weight`) VALUES (1, 'filter', 3, 10)");
+    db_query("INSERT INTO {filters} (`format`, `module`, `delta`, `weight`) VALUES (2, 'php', 0, 0)");
+    db_query("INSERT INTO {filters} (`format`, `module`, `delta`, `weight`) VALUES (3, 'filter', 2, 0)");
+    db_query("INSERT INTO {filters} (`format`, `module`, `delta`, `weight`) VALUES (3, 'filter', 1, 1)");
+    db_query("INSERT INTO {filters} (`format`, `module`, `delta`, `weight`) VALUES (3, 'filter', 3, 10)");
+
+    $config = array (
+    'default' => '1',
+    'theme' => 'advanced',
+    'buttons' => array(
+    'advimage' => array('advimage'=>'1'),
+    'advlink' => array('advlink' => '1'),
+    'default' => array('bold' => '1',
+                    'italic' => '1',
+                    'underline' => '1',
+                    'strikethrough' => '1',
+                    'justifyleft' => '1',
+                    'justifycenter' => '1',
+                    'justifyright' => '1',
+                    'justifyfull' => '1',
+                    'bullist' => '1',
+                    'numlist' => '1',
+                    'outdent' => '1',
+                    'indent' => '1',
+                    'undo' => '1',
+                    'redo' => '1',
+                    'link' => '1',
+                    'unlink' => '1',
+                    'anchor' => '1',
+                    'image' => '1',
+                    'cleanup' => '1',
+                    'sup' => '1',
+                    'sub' => '1',
+                    'code' => '1',
+                    'hr' => '1',
+                    'cut' => '1',
+                    'copy' => '1',
+                    'paste' => '1',
+                    'visualaid' => '1',
+                    'removeformat' => '1',
+                    'charmap' => '1'),
+    'font'=>array('formatselect'=>'1','styleselect'=>'1'),
+    'cmslink' => array('cmslink' => '1'),
+    'imce' => array('imce' => '1'),
+    'media' => array('media' => '1'),
+    'paste' => array('pasteword' => '1'),
+    'searchreplace' => array('search' => '1'),
+    'spellchecker' => array('spellchecker' => '1'),
+    'style' => array('styleprops' => '1'),
+    'table' => array('tablecontrols' => '1')),
+    'apply_source_formatting' => 'true',
+    'convert_fonts_to_spans' => 'true',
+    'language' => 'en',
+    'preformatted' => 'false',
+    'remove_linebreaks' => 'true',
+    'verify_html' => 'true',
+    'css_classes' => '',
+    'css_setting' => 'none',
+    'path_loc' => 'bottom',
+    'resizing' => 'true',
+    'toolbar_loc' => 'top',
+    'toolbar_align' => 'left',
+    'block_formats' => 'p, address, pre, h1, h2, h3, h4, h5, h6');
+
+    //Update new tinymce profile data.
+    db_query("UPDATE {wysiwyg} SET settings = '%s'", serialize($config));
+
+    //Disable editor by default for PHP input.
+    $config['default'] = 0;
+    db_query("UPDATE {wysiwyg} SET settings = '%s' WHERE `format` = '2'", serialize($config));
+
+
+}
+
+function osu_update_update_6001(){
+    //disable and uninstall mimedetect
+    module_disable(array('mimedetect'));
+    drupal_uninstall_module('mimedetect');
+
+    //turn on our form disabling features for all users but cws_dpla
+    variable_set('osu_update_lockdown','1');
+    return $ret = array();
+}
+
+/**
+ * Unset the Powered by Drupal Block
+ */
+function osu_update_update_6002(){
+    $ret = array();
+    $ret[] = update_sql("UPDATE {blocks} SET `region` = '' WHERE `module` = 'system' AND `delta` = '0'");
+    return $ret;
+}
+
+/**
+ * Disable "Search" menu item
+ */
+function osu_update_update_6003(){
+    $ret = array();
+    $ret[] = update_sql("UPDATE {menu_links} SET `hidden` = '1', `customized` = '1' WHERE `router_path` = 'search';");
+    return $ret;
+}
+
+/**
+ * Enable the "Nice Menus" module
+ */
+function osu_update_update_6004(){
+    $ret = array();
+    _drupal_install_module('nice_menus');
+    module_enable(array('nice_menus'));
+    return $ret;
+}
+
+/**
+ * Enable the "Menu Breadcrumb" module
+ */
+function osu_update_update_6005(){
+    $ret = array();
+    _drupal_install_module('menu_breadcrumb');
+    module_enable(array('menu_breadcrumb'));
+    return $ret;
+}
+
+/**
+ * Unset the Powered by Drupal Block... AGAIN.
+ */
+function osu_update_update_6006(){
+    $ret = array();
+    $ret[] = update_sql("UPDATE {blocks} SET `region` = '', `status` = 0 WHERE `module` = 'system' AND `delta` = '0'");
+    return $ret;
+}
+
+/**
+ * For sites installed when 'show_toggle' wasn't in the OSU profile for the
+ * wysiwyg module settings, this repairs that.
+ */
+function osu_update_update_6007(){
+  $ret = array();
+  $res = db_query('SELECT `format`, `settings` FROM {wysiwyg}');
+  if ($res) {
+    while ($row = db_fetch_array($res)) {
+      $settings = unserialize($row['settings']);
+      if (!isset($settings['show_toggle'])) {
+        $settings['show_toggle'] = '1';
+        db_query("UPDATE {wysiwyg} SET settings = '%s' WHERE `format` = '%d'", serialize($settings), $row['format']);
+      }
+    }
+  }
+  return $ret;
+}
+
+/**
+ * In this update we call system_theme_data() so that our registry of installed
+ * themes will be rebuilt. This is due to us freezing osu_grey and orange
+ * to osu_drupal_1_9.
+ */
+function osu_update_update_6008() {
+  system_theme_data();
+  return array();
+}
+
+/**
+ * update 6008 did the right thing, but it also disabled the theme. :/
+ * this should fix that
+ * We also need to "enable" the currently selected theme again.
+ */
+function osu_update_update_6009() {
+  $default_theme = variable_get('theme_default', 'osu_grey');
+  $result = db_query("UPDATE {system} SET `status` = %d WHERE `type` = 'theme' AND `name` = '%s'", 1, $default_theme);
+  return array();
+}
+
+/**
+ * Update the sso path from '/cgi-bin/sso.pl' to '/sso/rpc'
+ */
+function osu_update_update_6010() {
+  if (variable_get('osu_sso_path','NULL') != '/sso/rpc') {
+    variable_set('osu_sso_path','/sso/rpc');
+  }
+  return array();
+}
+
+/**
+ * In this update we call system_theme_data() so that our registry of installed
+ * themes will be rebuilt. This is due to us freezing osu_grey and orange
+ * to osu_drupal_1_10.
+ */
+
+function osu_update_update_6011() {
+  system_theme_data();
+
+  //enable the currently selected theme again
+  $default_theme = variable_get('theme_default', 'osu_grey');
+  $result = db_query("UPDATE {system} SET `status` = %d WHERE `type` = 'theme' AND `name` = '%s'", 1, $default_theme);
+  return array();
+}
+
+/**
+ * Enable the "jcarousel" and "viewscarousel" modules
+ */
+function osu_update_update_6012() {
+    $ret = array();
+    _drupal_install_module('jcarousel');
+    module_enable(array('jcarousel'));
+
+    _drupal_install_module('viewscarousel');
+    module_enable(array('viewscarousel'));
+
+    return $ret;
+}
+
+/**
+ * Enable
+ */
+function osu_update_update_6013() {
+    $ret = array();
+    if (variable_get('preprocess_css','NULL') != '1') {
+      variable_set('preprocess_css','1');
+    }
+    return $ret;
+}
+
+/**
+ * confident was released with the default of rebuilding the theme registry on every page, fixing that
+ */
+function osu_update_update_6014() {
+    $settings = theme_get_settings('osu_confident');
+    variable_set('theme_osu_confident_settings', array_merge($settings, array('zen_rebuild_registry' => 0)));
+    return array();
+}
+
+/**
+ * Enable the "biblio" and "biblio-pubmed" modules... set default biblio permissions
+ */
+function osu_update_update_6015() {
+    _drupal_install_module('biblio');
+    module_enable(array('biblio'));
+
+    _drupal_install_module('biblio_pm');
+    module_enable(array('biblio_pm'));
+
+    $biblio_perms = array();
+    //array $biblio_perms is in this format: rid => array_of_biblio_perms
+    //rid values as follows: 1 = anon, 2 = authenticated, 3 = author, 4 = advance author, 5 = administrator
+    //the permission 'access biblio content' has been removed so that the link will not show by default
+    $biblio_perms[1] = array('show download links', 'show export links', 'show filter tab', 'show own download links', 'show sort links', 'view full text'); 
+    $biblio_perms[2] = array('show download links', 'show export links', 'show filter tab', 'show own download links', 'show sort links', 'view full text', 'edit own biblio entries'); 
+    $biblio_perms[3] = array('show download links', 'show export links', 'show filter tab', 'show own download links', 'show sort links', 'view full text', 'edit own biblio entries', 'create biblio'); 
+    $biblio_perms[4] = array('show download links', 'show export links', 'show filter tab', 'show own download links', 'show sort links', 'view full text', 'edit own biblio entries', 'create biblio', 'edit all biblio entries', 'edit biblio authors'); 
+    $biblio_perms[5] = array('show download links', 'show export links', 'show filter tab', 'show own download links', 'show sort links', 'view full text', 'edit own biblio entries', 'create biblio', 'edit all biblio entries', 'edit biblio authors', 'administer biblio', 'import from file'); 
+    
+    foreach ($biblio_perms as $rid => $new_perms) {
+        //get permissions for the rid
+        $perm_string = db_result(db_query("SELECT perm FROM {permission} WHERE rid = %d", $rid));
+        $permissions = explode(',',$perm_string);
+        
+        //trim the selected perms, for good measure
+        foreach ($permissions as $index => $perm) {
+            $permissions[$index] = trim($perm);
+        }
+
+        //merge the existing perms ($permissions) with our new biblio perms ($new_perms) and put them all in a string
+        $updated_permissions = join(', ', array_merge($permissions, $new_perms));
+
+        //save it up
+        db_query("UPDATE {permission} SET perm = '%s' WHERE rid = %d", $updated_permissions, $rid);        
+    }
+
+    return array();
+}
+
+/**
+ * Disable biblio link
+ * this method failed, but has run on a couple of installs so to keep the
+ * numbering intact we'll just return the array and move on
+ */
+function osu_update_update_6016() {    
+    //disable the link
+    //db_query("UPDATE {menu_links} SET `hidden` = '1', `customized` = '1' WHERE `router_path` = 'biblio';");
+    return array();
+}
+
+/**
+ * In this update we call system_theme_data() so that our registry of installed
+ * themes will be rebuilt. This is due to us freezing osu_grey to osu_drupal_1_11.
+ */
+function osu_update_update_6017() {
+  system_theme_data();
+
+  //enable the currently selected theme again
+  $default_theme = variable_get('theme_default', 'osu_grey');
+  $result = db_query("UPDATE {system} SET `status` = %d WHERE `type` = 'theme' AND `name` = '%s'", 1, $default_theme);
+  return array();
+}
+
+/**
+ * Enable the jquery_ui module
+ */
+function osu_update_update_6018() {
+    $ret = array();
+    _drupal_install_module('jquery_ui');
+    module_enable(array('jquery_ui'));
+
+    return $ret;
+}
+
+/**
+ * Enable date_tools plugin for date module
+ */
+function osu_update_update_6019() {
+  _drupal_install_module('date_tools');
+  module_enable(array('date_tools'));
+  return array();
+}
+
+?>

@@ -1,0 +1,12 @@
+<?php
+
+// we'll figure out something to put here
+
+function osu_search_install() {
+}
+
+function osu_search_uninstall() {
+    variable_del('osu_search_other_title');
+    variable_del('osu_search_other_url');
+    variable_del('osu_search_other_results_page');    
+}

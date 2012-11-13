@@ -1,0 +1,442 @@
+<?php
+// $Id$ 
+
+/**
+ * @copyright Oregon State University, Central Web Services
+ * @author Barry Chen <barry dot chen at oregonstate dot edu>
+ * @package Drupal
+ * @subpackage modules
+ */
+
+/**
+ * Port to Drupal 6.x by Kenneth Lett <kenneth.lett@oregonstate.edu>
+ */
+  
+// require the config
+require_once 'osu_search.config.inc';
+
+// changed to new Drupal 6 menu API 
+
+function osu_search_menu() {
+  $items = array();
+  $items['search'] = array(
+    'title'            =>  'Search',
+    'description'      =>  t('Search site content.'),
+    'page callback'    =>  'osu_search_main',
+    'access callback'  =>  TRUE);
+    
+  $items['admin/settings/osu_search'] = array(
+    'title'            =>  'OSU Search',
+    'description'      =>  t('Settings for the OSU Search module.'),
+    'page callback'    =>  'osu_search_settings',
+    'access callback'  =>  'user_access',
+    'access arguments' =>  array('administer site configuration'));
+
+  return $items;
+}
+
+function osu_search_main() {
+  $output = '';
+  $args = func_get_args();
+  list($term, $start, $where) = $args;
+  $term = urldecode(urldecode($term));
+  $collection = null;
+
+  $output .= drupal_get_form('osu_search_form', $term, $where);
+
+  if (empty($start)) {
+      $start = 0;
+  }
+
+  $search_collection = $where == 4;
+  $has_valid_collection = variable_get('osu_search_collection_id', 'All') != 'All';
+  $is_collection_default =  variable_get('osu_search_collection_as_primary', 0) == 1;
+  $is_search_site_disabled = variable_get('osu_search_drupal_disable', 0) == 1;
+
+  // 1) If the user selected collection, use it
+  // 2) If search "this site" is disabled or search collection is the default and 
+  // the user is not searching the extra site and there's a valid collection use it.
+  if ($search_collection || ( $where != 2 && empty($collection) &&  $has_valid_collection && 
+       (($is_collection_default && !isset($where)) || $is_search_site_disabled))
+     ) {
+
+    $collection = variable_get('osu_search_collection_id', 'All');
+  }
+
+  // if there's a search term, do the thing
+  if ($term) {
+    global $osu_search_xml_source;
+    global $osu_search_xsl_file;
+
+    $base_path = base_path();
+    // Remove the trailing slash at the end. Otherwise the google search appliance would only 
+    // search pages in the root instead of including subsites
+    if (substr($base_path, -1) == '/') {
+      $base_path = substr($base_path, 0, -1);
+    }
+    $base_web_path = 'http'.(empty($_SERVER['HTTPS'])?'':'s').'://'.$_SERVER['SERVER_NAME'].$base_path;
+
+    $query_params = '&start='.$start;
+    $q = $term;
+    
+    if (!empty($collection)) {
+        $query_params .= '&site='.$collection; // Add collection filtering
+    } elseif (strpos($term, 'site:') === false) {
+        $q .= ' site:'.$base_web_path; // or filter using a site url
+    }
+    $xml_data = file_get_contents($osu_search_xml_source.'?of=xml&q='.urlencode($q).$query_params);
+    $drupal_xml = '<DRUPAL><search_url>'.$base_web_path.'/search/'.urlencode(urlencode(urlencode($q))).'</search_url><where>'.$where.'</where></DRUPAL>';
+    $xml_data = str_replace('</GSP>', $drupal_xml.'</GSP>', $xml_data);
+
+    $xsl_info = file_get_contents(dirname(__FILE__).'/'.$osu_search_xsl_file);
+    $output .= osu_search_xml2html($xml_data, $xsl_info);
+
+  }
+
+  return $output;
+}
+
+function osu_search_form(&$form_state, $term, $where=1) {
+  $form = array();
+  $choices = array();
+  $collection_title = variable_get('osu_search_collection_title', '');
+  $collection_primary = variable_get('osu_search_collection_as_primary', 1);
+
+  drupal_add_css('sites/all/modules/osu_search/osu_search.css');
+  drupal_add_js('misc/jquery.js');
+  drupal_add_js('sites/all/modules/osu_search/osu_search.js');
+
+  $displayTerm = $term;
+  if(strpos($displayTerm,'site:')){
+    $displayTerm = substr($displayTerm,0,strpos($displayTerm,'site:'));
+  }  
+  
+  $form['#action'] = url('search');
+  $form['term'] = array(
+    '#type'           =>  'textfield',
+    '#default_value'  =>  $displayTerm
+  );
+
+  // If collections are the default search, display them as the first search option
+  if ($collection_title != '' && $collection_primary) {
+    $choices['4'] = variable_get('osu_search_collection_title', '');
+  }
+
+  // Display the 'this site' search option as long as it has not been disabled
+  if (variable_get('osu_search_drupal_disable', 0) == 0) {
+      $choices['1'] = t('This Site');
+  }
+
+  // Add the collection search option now if it was not set as the default option
+  if ($collection_title != '' && !$collection_primary) {
+    $choices['4'] = variable_get('osu_search_collection_title', '');
+  }
+
+  if (($osu_search_other_url = variable_get('osu_search_other_url', '')) != '') {
+    $osu_search_other_title = variable_get('osu_search_other_title', '');
+    $choices['2'] = (empty($osu_search_other_title)) ? $osu_search_other_url : $osu_search_other_title;
+  }
+
+  // Display an option to search OSU if admin user has not disabled it.
+  if (variable_get('osu_search_hide_osu', 0) == 0) {
+    $choices['3'] = 'OSU';
+  }
+
+  $form['where'] = array(
+    '#type'           =>  'radios',
+    '#default_value'  =>  $where,
+    '#options'        =>  $choices
+  );
+  $form['submit'] = array(
+    '#type'   =>  'submit',
+    '#value'  =>  'Search'
+  );
+
+ return $form;
+}
+
+// new form api, now uses $form_state
+function osu_search_form_submit($form, &$form_state) {
+  global $osu_search_url;
+
+  switch ($form_state['values']['where']) {
+  case '4':
+    drupal_goto('search/'.urlencode(urlencode($form_state['values']['term'])).'/0/4');
+    exit;
+  case '3':
+    drupal_goto($osu_search_url, 'q='.urlencode($form_state['values']['term']));
+    exit;
+  case '2':
+    if (($osu_search_other_url = variable_get('osu_search_other_url', '')) != '') {
+      if(variable_get('osu_search_other_results_page', 1) == 1){
+      	drupal_goto('search/'.urlencode(urlencode($form_state['values']['term'] . ' site:'.$osu_search_other_url)).'/0/2');//stay within current site
+      } else {
+      	drupal_goto($osu_search_url, 'q='.urlencode($form_state['values']['term'].' site:'.$osu_search_other_url));//go to university search site
+      }
+    exit;
+    }
+  case '1':
+  default:
+    // I'm encoding twice because Drupal is so damn nice that
+    // it would automatically decode first and then explode on '/'.
+    // In other words, I need it if someone searches for 'foobar/1/10'...
+    drupal_goto('search/'.urlencode(urlencode($form_state['values']['term'])).'/0/1');
+    exit;
+  }
+}
+
+// new form api, now uses $form_state
+function osu_search_form_validate($form, &$form_state) {
+  if (trim($form_state['values']['term']) === '') {
+    form_set_error('term', t('Please enter what you are looking for&hellip;'));
+  }
+}
+
+function osu_search_settings() {
+  $output = "<p>By default this module will search your Drupal site. You don't need to change ".
+            'the advanced settings below. If you have any questions regarding the settings in '.
+            "this page, don't hesitate to ".'<a href="http://oregonstate.edu/cws/contact">contact us</a>.</p>'
+           .drupal_get_form('osu_search_settings_form');
+  return $output;
+}
+
+// new form api, now uses $form_state
+function osu_search_settings_form(&$form_state) {
+  global $user;
+  $form = array();
+
+  // Settings regarding searching another site
+  $form['osu_search_other_site_fieldset_start'] = array(
+    '#value' => '<fieldset><legend>1. Search an extra site</legend>'.
+                    '<p>Use the settings below if you want to give users the option to search an '.
+                    'extra site in addition to searching your Drupal site.</p>'
+  );
+  $form['osu_search_other_title'] = array(
+    '#type'           =>  'textfield',
+    '#title'          =>  t('Site Title'),
+    '#default_value'  =>  variable_get('osu_search_other_title', '')
+  );
+  $form['osu_search_other_url'] = array(
+    '#type'           =>  'textfield',
+    '#title'          =>  t('Site URL'),
+    '#default_value'  =>  variable_get('osu_search_other_url', '')
+  );
+  $form['osu_search_other_results_page'] = array(
+  	'#type'			  =>  'checkbox',
+    '#title'		  =>  t('Show search results on this site (if left unchecked results will be shown on the OSU search page).'),
+  	'#default_value'  =>  variable_get('osu_search_other_results_page', 1)
+  );  
+  $form['osu_search_other_site_fieldset_end'] = array(
+    '#value' => '</fieldset>'
+  );
+
+  if (is_object($user) && $user->uid === '1' && ($user->name == 'cws_dpla' || $user->name == 'ext_dpla')) {
+    // Collection settings
+	$form['osu_search_collection_start_fieldset'] = array(
+		'#value' => '<fieldset><legend>2. Collection Settings</legend>'.
+                    '<p>Using these settings you can specify a google search appliance collection that your users can search. '.
+                    "A collection is a group/listing of multiple urls (which may have different domains). If you don't have ".
+                    'a collection or have questions regarding how to create  one, please '.
+                    '<a href="http://oregonstate.edu/cws/contact">contact us</a>.</p>'
+
+	);
+    $form['osu_search_collection_title'] = array(
+      '#type'           =>  'textfield',
+      '#title'          =>  t('Collection Title'),
+      '#description'    =>  t("The label to display in the search page. This field is required if you want to use collection search."),
+      '#default_value'  =>  variable_get('osu_search_collection_title', '')
+    );
+    $form['osu_search_collection_id'] = array(
+      '#type'          => 'select',
+      '#title'         => t('Search Appliance Collection'),
+      '#description'   => t("The collection to use when performing the search queries. This list ".
+                            "is generated directly from the google search appliance."),
+      '#default_value' => variable_get('osu_search_collection_id', 'All'),
+      '#options'       => osu_search_get_collections()
+    );
+    $form['osu_search_collection_as_primary'] = array(
+      '#type'			=>  'checkbox',
+      '#title'		    =>  t('Do you want to search this collection by default?'),
+      '#default_value'  =>  variable_get('osu_search_collection_as_primary', 0),
+      '#description'    =>  t("The top hat search box and other search boxes in drupal will ".
+                              "search this collection if this option is selected.")
+    );  
+    $form['osu_search_drupal_disable'] = array(
+      '#type'           =>  'checkbox',
+      '#title'		    =>  t('Do you want to disable "Search this site" option?'),
+      '#default_value'  =>  variable_get('osu_search_drupal_disable', 0),
+      '#description'    =>  t("If the end users will always be searching the collection, you can ".
+                              "use this option to remove the search this site option."),
+    );  
+	$form['osu_search_collection_end_fieldset'] = array(
+		'#value' => '</fieldset>'
+	);
+
+	$form['osu_search_misc_fieldset_start'] = array(
+		'#value' => '<fieldset><legend>3. Miscellaneous Settings</legend>'
+    );
+    $form['osu_search_hide_osu'] = array(
+      '#type'			  =>  'checkbox',
+      '#title'		  =>  t('Hide "search OSU" option (if checked the option to search OSU will be hidden from the search page).'),
+      '#default_value'  =>  variable_get('osu_search_hide_osu', 0)
+    );  
+	$form['osu_search_misc_fieldset_end'] = array(
+		'#value' => '</fieldset>'
+    );
+
+  }
+
+  $form['submit'] = array(
+    '#type'   =>  'submit',
+    '#value'  =>  'Save'
+  );
+
+  return $form;
+}
+
+function osu_search_settings_form_submit($form, &$form_state) {
+  global $user;
+  variable_set('osu_search_other_title', $form_state['values']['osu_search_other_title']);
+  variable_set('osu_search_other_url', $form_state['values']['osu_search_other_url']);
+  variable_set('osu_search_other_results_page', $form_state['values']['osu_search_other_results_page']);//determines whether to display search results on current site or university search  
+
+  if (is_object($user) && $user->uid === '1' && ($user->name == 'cws_dpla' || $user->name == 'ext_dpla')) {
+    variable_set('osu_search_collection_title', $form_state['values']['osu_search_collection_title']);
+    variable_set('osu_search_collection_id', $form_state['values']['osu_search_collection_id']);
+    variable_set('osu_search_collection_as_primary', $form_state['values']['osu_search_collection_as_primary']);
+    variable_set('osu_search_drupal_disable', $form_state['values']['osu_search_drupal_disable']);
+    variable_set('osu_search_hide_osu', $form_state['values']['osu_search_hide_osu']);
+  }
+}
+
+/**
+ * Converts a pure xml/xslt file to plain html (so its compatible with older browsers)
+ * Stolen from OSU Search.
+ * PHP5 ONLY!
+ */
+function osu_search_xml2html($xmldata, $xsldata) {
+  $xml = @DOMDocument::loadXML($xmldata);
+  $xsl = @DOMDocument::loadXML($xsldata);
+
+  if (!$xml || !$xsl) {
+    return t('The search engine is having a bit of trouble right now.');
+  }
+
+  $proc = new XSLTProcessor();
+  $proc->importStyleSheet($xsl);
+  $doc = $proc->transformToDoc($xml);
+  if ($doc === false) {
+    return t('Error processing search results');
+  }
+  return $doc->saveHTML();
+}
+
+/*
+ * Sets the search form variable for use in the .tpl files.
+ * Currently between graphical based and text based.
+ */ 
+function osu_search_get_template_form(&$vars) {
+  $search_form = drupal_get_form('osu_search_template_form');
+  $vars['osu_search_form'] = $search_form;
+  
+  // Sets $image to true to specify the graphical search option in osu_search_template_form
+  $image_submit_search_form = drupal_get_form('osu_search_template_form', true);
+  $vars['osu_search_image_submit_form'] = $image_submit_search_form;
+}
+
+/* 
+ * Creates the form html code for both text and image versions
+ */ 
+function osu_search_template_form(&$form_state, $image = false) {
+  $form = array();
+  $form['#action'] = url('search');
+  $form['search-query'] = array(
+    '#id'     =>  'osu-search-query',
+    '#type'   =>  'textfield',
+    '#size'   =>  ''
+  );
+  $form['search-scope'] = array(
+    '#id'    =>  'osu-search-scope',
+    '#type'  =>  'checkbox',
+    '#title' =>  'Search all of OSU.',
+  );
+  // sets the image variables
+  if ($image) { 
+    $value = ' '; 
+    $type = 'image_button'; 
+    $transparent_image = path_to_theme().'/images/blank.gif'; //must be set or IE shows broken image icon
+  } else { 
+    $value = 'Search'; 
+    $type = 'submit'; 
+    $transparent_image = '';
+  }  
+  $form['submit'] = array(
+    '#id'     =>  'osu-search-submit',
+    '#type'   =>  $type,
+    '#value'  =>  $value,
+    '#src'    =>  $transparent_image
+  );
+
+  return $form;
+}
+
+// new form api, now uses $form_state
+function osu_search_template_form_submit($form, &$form_state) {
+  $has_valid_collection = variable_get('osu_search_collection_id', 'All') != 'All';
+  $is_collection_default =  variable_get('osu_search_collection_as_primary', 0) == 1;
+  $is_search_site_disabled = variable_get('osu_search_drupal_disable', 0) == 1;
+  $search_query = trim($form_state['values']['search-query']);
+
+  if (empty($search_query)) {
+    return false;
+  }
+  $form_state['values']['term'] = $form_state['values']['search-query'];
+
+  // search-scope determines whether or not to search all of osu.
+  if ($form_state['values']['search-scope'] == '1') {
+    $form_state['values']['where'] = '3'; // search osu
+  } elseif ($has_valid_collection && ($is_collection_default || $is_search_site_disabled)) {
+    $form_state['values']['where'] = '4';
+  } else {
+    $form_state['values']['where'] = '1';
+  }
+  osu_search_form_submit('osu_search_form', &$form_state);
+}
+
+/**
+ * Implements hook_nodeapi().
+ *
+ * @access public
+ * @param $node "The node the action is being performed on."
+ * @param $op The kind of action.
+ * @see http://api.drupal.org/api/5/function/hook_nodeapi
+ * @return void
+ */
+function osu_search_nodeapi(&$node, $op, $a3, $a4) { 
+  if ($op == 'validate') {
+    $path = strtolower(trim($node->path));
+    if ($path === 'search') {
+      form_set_error( 'path', t('You cannot use the URL path \'search\'. It has been reserved for the OSU Search module.'));
+    }
+  }
+}
+
+/**
+ * Returns an array with valid collection ids in the google search appliance. It performs an http
+ * request to find out the valid names of collections.
+ * @return array $collections
+ */
+function osu_search_get_collections() {
+  global $osu_search_collection_xml;
+  $collections = array();
+  $xml_string = file_get_contents($osu_search_collection_xml);
+  $xml = simplexml_load_string($xml_string);
+
+  foreach ($xml->xpath("//gsa:content [@name='entryID']") as $collection) {
+    $collection_name = (string) $collection;
+    $collections[$collection_name] = $collection_name;
+  }
+  ksort($collections);
+
+  return $collections;
+}

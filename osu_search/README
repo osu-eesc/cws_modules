@@ -1,0 +1,62 @@
+Oh hi, won't you please come in...
+
+WHAT IS IT?
+==============================
+  OSU Search is a Drupal module that embeds OSU search results into the site.
+  It is at YOUR_SITE/search once the module is installed.  In addition to
+  searching YOUR_SITE, it also offers the option to search all of OSU, and
+  an optional "other" site.  (Please see "HOW?" on how to set up the "other"
+  site.)  The OSU and "other" searches will be redirected to the normal OSU
+  search site.
+
+  This module was developed and tested with Drupal 5.x.  It requires PHP 5
+  as well.
+
+
+HOW?
+==============================
+  The module comes with a set of default configuration values that should
+  work with the OSU search engine (powered by Nutch(r)) without any set up.
+
+  However, if you want to use another search engine (assuming it accepts the
+  same HTTP GET variables and uses the same XML schema--good luck!) or want 
+  transform the XML output differently, change the values in 
+  osu_search.config.inc.
+
+  $GLOBALS['osu_search_url'] is the web path of the search site.  
+  $GLOBALS['osu_search_xml_source'] is the web path for XML output.  This
+  is the same as $GLOBALS['osu_search_url'] by default.
+  $GLOBALS['osu_search_xsl_file'] is the location of the XSL file for 
+  transforming the XML output into HTML for the embedded results.
+
+  To set up the "other" site, go to YOUR_SITE/admin/settings/osu_search.  The
+  site title is the label text used for the radio button on the search form. 
+  If the site title is empty, then the site url will be used.
+
+  The module also has a set of CSS ids and classes that a Drupal theme can 
+  overwite.  See osu_search.css for the default styles.  Keep in mind that some
+  of the ids and classes are dependent on the XSL used.
+
+  OSU Search provides a way to add a simple search form to templates.  Add the
+  following lines of PHP code to template.php in your theme's root directory,
+  in the _phptemplate_variables() function:
+
+    if (module_exists('osu_search')) {
+        osu_search_get_template_form($vars);
+    }
+
+  for all the hooks you need.  For example, if you need it for page.tmpl.php,
+  the code in template.php would look something like: 
+
+    function _phptemplate_variables($hook, $vars) {
+      if ($hook == 'page') {
+        if (module_exists('osu_search')) {
+            osu_search_get_template_form($vars);
+        }
+        return $vars;
+      }
+      return array();
+    }
+
+  in addition to any existent code.  Then the variable $osu_search_form will be
+  available in page.tmpl.php.

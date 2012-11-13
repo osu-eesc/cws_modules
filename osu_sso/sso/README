@@ -1,0 +1,10 @@
+When using this library on a non-CWS hosted website, the following are required:
+
+ * php with curl and mysql support
+ * libcurl with ssl support
+ * php Pear::XML_RPC package (NOTE: older versions of this package have been known not to
+   work with ssl. Always be sure to do a "pear upgrade XML_RPC" to get the latest version)
+ * access to a mysql database (required only if using database session management)
+ * hosting on a .oregonstate.edu subdomain (required only if using SSO authentication)
+
+If you have any questions about using this library, please contact cws@lists.oregonstate.edu
